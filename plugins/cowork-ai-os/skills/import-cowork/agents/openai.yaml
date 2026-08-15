@@ -1,0 +1,4 @@
+interface:
+  display_name: "Import Cowork to AI OS"
+  short_description: "Recover selected Cowork context into a private AI OS"
+  default_prompt: "Inventory my local Claude Cowork sessions, let me choose what to recover, and build a private AI OS without touching source data."

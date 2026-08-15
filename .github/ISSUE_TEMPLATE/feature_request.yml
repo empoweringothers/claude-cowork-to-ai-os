@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a privacy-preserving source adapter or workflow improvement.
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user need without including private data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Safety boundary
+      options:
+        - label: The proposal keeps sources read-only and requires preview before writes.
+          required: true
+        - label: The proposal does not require cookies, credentials, private APIs, UI scraping, or telemetry.
+          required: true

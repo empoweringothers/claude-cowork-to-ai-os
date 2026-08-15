@@ -1,0 +1,19 @@
+{
+  "name": "empowering-others-ai",
+  "description": "Privacy-first tools for moving user-approved Claude context into readable, local AI systems.",
+  "owner": {
+    "name": "Empowering Others"
+  },
+  "plugins": [
+    {
+      "name": "cowork-ai-os",
+      "source": "./plugins/cowork-ai-os",
+      "description": "Recover selected local Claude Cowork files, project instructions, memory, and conversations into a private AI OS.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Empowering Others"
+      },
+      "homepage": "https://github.com/empoweringothers/claude-cowork-to-ai-os"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Recovered Cowork content is private by default.
+Inbox/Cowork-Import/
+Projects/Cowork-Import/
+.ai-os/private/*
+!.ai-os/private/.gitignore

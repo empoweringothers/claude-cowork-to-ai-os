@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/empoweringothers/claude-cowork-to-ai-os/security/advisories/new
+    about: Never put private Cowork data, paths, IDs, or credentials in a public issue.

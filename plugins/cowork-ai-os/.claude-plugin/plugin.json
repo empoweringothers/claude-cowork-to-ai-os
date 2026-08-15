@@ -1,0 +1,19 @@
+{
+  "name": "cowork-ai-os",
+  "description": "A privacy-first Claude Code workflow for recovering selected local Cowork files, project instructions, memory, and conversations into a reviewable AI OS.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Empowering Others",
+    "url": "https://github.com/empoweringothers"
+  },
+  "homepage": "https://github.com/empoweringothers/claude-cowork-to-ai-os",
+  "repository": "https://github.com/empoweringothers/claude-cowork-to-ai-os",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "cowork",
+    "memory",
+    "ai-os"
+  ]
+}

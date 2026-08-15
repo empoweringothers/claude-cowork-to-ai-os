@@ -1,0 +1,21 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Generated local recovery data must never enter the public repository.
+/AI-OS/
+/exports/
+/captures/
+/inventory*.json
+/inventory*.md
+/inventory*.html
+/*.local.json
+/.ai-os/private/
