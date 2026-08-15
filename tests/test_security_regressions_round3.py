@@ -164,6 +164,36 @@ class SecurityRegressionRoundThreeTests(unittest.TestCase):
                 verify_module._identity_marker(handle_stat),
             )
 
+    def test_windows_stream_scan_keeps_handle_ctime_race_check(self) -> None:
+        target = self.base / "scan-target.txt"
+        target.write_text("synthetic safe text", encoding="utf-8")
+        real_fstat = verify_module.os.fstat
+        fstat_calls = 0
+
+        def changing_handle_stat(descriptor):
+            nonlocal fstat_calls
+            fstat_calls += 1
+            info = real_fstat(descriptor)
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_nlink=info.st_nlink,
+                st_size=info.st_size,
+                st_mtime_ns=info.st_mtime_ns,
+                st_ctime_ns=info.st_ctime_ns + (1 if fstat_calls > 1 else 0),
+            )
+
+        with mock.patch.object(verify_module.os, "name", "nt"):
+            expected = verify_module._identity_marker(target.lstat())
+            with mock.patch.object(
+                verify_module.os, "fstat", side_effect=changing_handle_stat
+            ):
+                with self.assertRaises(SafetyError):
+                    verify_module._stream_secret_scan(target, expected)
+
+        self.assertEqual(fstat_calls, 2)
+
     @unittest.skipIf(os.name == "nt", "hard-link timing test is POSIX-specific")
     def test_verify_rejects_file_swapped_to_hardlink_after_inventory(self) -> None:
         capture = self.base / "capture"

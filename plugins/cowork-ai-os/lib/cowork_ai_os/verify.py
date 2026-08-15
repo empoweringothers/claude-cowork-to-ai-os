@@ -83,6 +83,7 @@ def _stream_secret_scan(
             or _identity_marker(opened) != expected
         ):
             raise SafetyError("verification path changed into a special file")
+        opened_ctime_ns = opened.st_ctime_ns
         oversize = opened.st_size > max_bytes
         while scanned < max_bytes:
             chunk = os.read(fd, min(1024 * 1024, max_bytes - scanned))
@@ -92,7 +93,10 @@ def _stream_secret_scan(
             carry = (carry + chunk)[-16384:]
             scanned += len(chunk)
         after = os.fstat(fd)
-        if _identity_marker(after) != expected:
+        if (
+            _identity_marker(after) != expected
+            or after.st_ctime_ns != opened_ctime_ns
+        ):
             raise SafetyError("verification path changed while it was read")
         return sorted(findings), oversize
     finally:
