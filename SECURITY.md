@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Only the newest tagged release is supported. The project is pre-release until
-`v0.1.0` is published.
+Only the newest tagged release is supported. The initial supported MVP release
+is `v0.1.0`.
 
 ## Report a vulnerability or accidental exposure
 

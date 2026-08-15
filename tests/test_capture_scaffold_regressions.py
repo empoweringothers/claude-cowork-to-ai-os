@@ -5,13 +5,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "plugins" / "cowork-ai-os" / "lib"
 sys.path.insert(0, str(LIB))
 
-from cowork_ai_os.capture import capture_sessions
+import cowork_ai_os.capture as capture_module
+from cowork_ai_os.capture import CaptureLimits, capture_sessions
 from cowork_ai_os.discovery import discover_sessions
 from cowork_ai_os.safety import SafetyError
 from cowork_ai_os.scaffold import scaffold_ai_os
@@ -179,6 +181,60 @@ class CaptureScaffoldRegressionTests(unittest.TestCase):
         self.assertIn(
             "CUSTOM\\_TEXT\\_ARTIFACT\\_CANARY", imported[0].read_text()
         )
+
+    def test_artifact_identity_does_not_use_cached_direntry_stat(self) -> None:
+        session = self.add_session("account-a", "workspace-a", "session-a")
+        uploads = session / "uploads"
+        uploads.mkdir()
+        artifact = uploads / "note.txt"
+        artifact.write_text("SYNTHETIC_ARTIFACT", encoding="utf-8")
+        record = discover_sessions(self.source).sessions[0]
+        real_scandir = capture_module.os.scandir
+
+        class EntryWithoutIdentity:
+            def __init__(self, entry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def is_symlink(self):
+                return self._entry.is_symlink()
+
+            def is_dir(self, *, follow_symlinks=True):
+                return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+            def is_file(self, *, follow_symlinks=True):
+                return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+            def stat(self, *, follow_symlinks=True):
+                raise AssertionError("artifact identity must come from Path.lstat()")
+
+        class ScandirResult:
+            def __init__(self, entries):
+                self._entries = entries
+
+            def __enter__(self):
+                return iter(self._entries)
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        def identity_free_scandir(directory):
+            with real_scandir(directory) as entries:
+                wrapped = [EntryWithoutIdentity(entry) for entry in entries]
+            return ScandirResult(wrapped)
+
+        with mock.patch.object(
+            capture_module.os, "scandir", side_effect=identity_free_scandir
+        ):
+            sources, warnings = capture_module._walk_artifacts(
+                record, CaptureLimits()
+            )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].inode, artifact.lstat().st_ino)
+        self.assertEqual(sources[0].device, artifact.lstat().st_dev)
 
     def test_scaffold_rejects_destination_inside_original_source(self) -> None:
         self.add_session("account-a", "workspace-a", "session-a")

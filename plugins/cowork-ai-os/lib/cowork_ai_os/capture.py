@@ -453,9 +453,20 @@ def _walk_artifacts(record: SessionRecord, limits: CaptureLimits) -> Tuple[List[
                         warnings.append("Skipped a special file in {}.".format(kind))
                         continue
                     try:
-                        info = entry.stat(follow_symlinks=False)
+                        # ``DirEntry.stat()`` deliberately reports zero for
+                        # st_ino, st_dev, and st_nlink on Windows.  Approval
+                        # markers are later checked with Path.lstat(), so use
+                        # the same full stat source here or an unchanged file
+                        # appears to have changed between preview and apply.
+                        info = path.lstat()
                     except OSError:
                         warnings.append("Skipped an unreadable {} file.".format(kind))
+                        continue
+                    if stat.S_ISLNK(info.st_mode):
+                        warnings.append("Skipped a symlink in {}.".format(kind))
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        warnings.append("Skipped a special file in {}.".format(kind))
                         continue
                     if info.st_nlink > 1:
                         warnings.append("Skipped a hard-linked {} file.".format(kind))

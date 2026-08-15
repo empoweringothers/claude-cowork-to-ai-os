@@ -45,6 +45,11 @@ def _load_manifest(path: Path, root: Path) -> Optional[Mapping[str, Any]]:
 
 
 def _identity_marker(info: os.stat_result) -> Tuple[int, int, int, int, int, int, int]:
+    # On Windows, path-based stat and handle-based fstat can expose different
+    # ``st_ctime`` semantics, and Python has deprecated that field there.
+    # File identity, link count, size, and mtime remain bound across the read;
+    # normalize only the non-portable ctime component.
+    ctime_ns = 0 if os.name == "nt" else info.st_ctime_ns
     return (
         stat.S_IFMT(info.st_mode),
         info.st_dev,
@@ -52,7 +57,7 @@ def _identity_marker(info: os.stat_result) -> Tuple[int, int, int, int, int, int
         info.st_nlink,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        ctime_ns,
     )
 
 

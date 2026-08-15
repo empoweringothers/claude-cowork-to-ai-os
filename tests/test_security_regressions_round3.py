@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -131,6 +132,37 @@ class SecurityRegressionRoundThreeTests(unittest.TestCase):
         self.assertTrue(
             any("private provenance" in item for item in result["errors"])
         )
+
+    def test_windows_identity_marker_normalizes_only_deprecated_ctime(self) -> None:
+        common = {
+            "st_mode": 0o100600,
+            "st_dev": 11,
+            "st_ino": 22,
+            "st_nlink": 1,
+            "st_size": 33,
+            "st_mtime_ns": 44,
+        }
+        path_stat = SimpleNamespace(**common, st_ctime_ns=55)
+        handle_stat = SimpleNamespace(**common, st_ctime_ns=66)
+
+        with mock.patch.object(verify_module.os, "name", "nt"):
+            self.assertEqual(
+                verify_module._identity_marker(path_stat),
+                verify_module._identity_marker(handle_stat),
+            )
+            changed_inode = SimpleNamespace(
+                **{**common, "st_ino": 23}, st_ctime_ns=66
+            )
+            self.assertNotEqual(
+                verify_module._identity_marker(path_stat),
+                verify_module._identity_marker(changed_inode),
+            )
+
+        with mock.patch.object(verify_module.os, "name", "posix"):
+            self.assertNotEqual(
+                verify_module._identity_marker(path_stat),
+                verify_module._identity_marker(handle_stat),
+            )
 
     @unittest.skipIf(os.name == "nt", "hard-link timing test is POSIX-specific")
     def test_verify_rejects_file_swapped_to_hardlink_after_inventory(self) -> None:

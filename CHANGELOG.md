@@ -3,7 +3,7 @@
 All notable changes will be documented here. The project follows semantic
 versioning after the first stable release.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-08-15
 
 - Add a dependency-free local Cowork doctor, metadata inventory, selected
   capture, AI OS scaffold, and verification workflow.
