@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-Only the newest tagged release is supported. The initial supported MVP release
-is `v0.1.0`.
+Only the newest tagged release is supported. The current supported MVP release
+is `v0.1.1`.
 
 ## Report a vulnerability or accidental exposure
 
@@ -19,6 +19,8 @@ or recovered file.
 - The extractor contains no networking or telemetry code.
 - Credential and browser-state paths are denied.
 - Symlinks and special files are skipped.
+- Source reads use handle-bound containment on POSIX and Windows so a raced
+  parent link cannot redirect the opened file outside the selected root.
 - Public tests use fictional fixtures only.
 - Release messages record the tag and full source commit, then pin the code
   actually installed by verifying the release archive's SHA-256 and internal

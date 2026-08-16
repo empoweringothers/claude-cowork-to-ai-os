@@ -96,6 +96,30 @@ def validate() -> list[str]:
     if release.get("release_tag") != f"v{version}":
         problems.append("RELEASE.json tag differs from plugin version")
 
+    runtime_init = PLUGIN / "lib" / "cowork_ai_os" / "__init__.py"
+    try:
+        runtime_tree = ast.parse(
+            runtime_init.read_text(encoding="utf-8"), filename=str(runtime_init)
+        )
+    except (OSError, SyntaxError) as exc:
+        problems.append(f"invalid runtime version module: {exc}")
+    else:
+        runtime_version = None
+        for node in runtime_tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "__version__"
+                    for target in node.targets
+                )
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                runtime_version = node.value.value
+                break
+        if runtime_version != version:
+            problems.append("runtime __version__ differs from plugin version")
+
     skill = PLUGIN / "skills" / "import-cowork" / "SKILL.md"
     if skill.is_file():
         text = skill.read_text(encoding="utf-8")
@@ -131,12 +155,18 @@ def validate() -> list[str]:
     if "verify_release.py" not in setup_message or "Release ZIP SHA-256" not in setup_message:
         problems.append("setup message must verify the release ZIP and internal manifest")
 
-    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
-        encoding="utf-8"
-    )
-    for line in workflow.splitlines():
-        if "uses: actions/" in line and not re.search(r"@[0-9a-f]{40}(?:\s|$)", line):
-            problems.append("GitHub Actions must use full commit pins")
+    workflow_path = ROOT / ".github" / "workflows" / "validate.yml"
+    if workflow_path.is_file():
+        workflow = workflow_path.read_text(encoding="utf-8")
+        for line in workflow.splitlines():
+            if "uses: actions/" in line and not re.search(
+                r"@[0-9a-f]{40}(?:\s|$)", line
+            ):
+                problems.append("GitHub Actions must use full commit pins")
+    elif not (ROOT / "FILE-SHA256SUMS.json").is_file():
+        # Release archives deliberately omit CI configuration, but source
+        # checkouts must keep the pinned validation workflow.
+        problems.append("missing required file: .github/workflows/validate.yml")
 
     for path in ROOT.rglob("*"):
         if ".git" in path.parts:

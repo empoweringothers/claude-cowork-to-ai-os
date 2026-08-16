@@ -1,9 +1,9 @@
 """Metadata-only Cowork session discovery.
 
-Inventory intentionally never opens transcript, instruction, upload, output,
-or memory files. It parses each ``local_*.json`` task record but retains and
-emits only an allowlist of metadata fields; all other source material is
-represented with filesystem metadata from ``lstat``.
+Inventory intentionally never opens transcript, instruction, ``spaces.json``,
+upload, output, or memory files. It parses each ``local_*.json`` task record
+but retains and emits only an allowlist of metadata fields; all other source
+material is represented with filesystem metadata from ``lstat``.
 """
 
 from __future__ import annotations
@@ -48,6 +48,11 @@ ARTIFACT_FOLDER_KINDS = {
     "outputs": ("outputs", "artifacts"),
 }
 EXCLUDED_SESSION_DESCENDANTS = {"subagent", "subagents", "subagent-sessions"}
+NON_SESSION_WORKSPACE_ROOTS = {
+    "agent",
+    "spaces",
+    *(name for names in ARTIFACT_FOLDER_KINDS.values() for name in names),
+}
 SAFE_METADATA_KEYS = (
     "id",
     "sessionId",
@@ -103,6 +108,7 @@ SESSION_ASSOCIATION_KEYS = (
     "session_path",
 )
 SESSION_METADATA_CONTAINERS = ("session", "metadata", "conversation")
+MAX_SPACE_IDENTIFIER_CHARS = 255
 
 
 @dataclass
@@ -117,7 +123,15 @@ class SessionRecord:
     cli_session_identifier: str = field(default="", repr=False)
     title: str = "Untitled session"
     project: str = ""
+    # Only a valid top-level ``spaceId`` may become filesystem identity for
+    # ``workspace/spaces/<id>/memory``.  Keep the broader association used for
+    # selected instruction/display lookup separate so legacy metadata cannot
+    # influence path construction.
     space_identifier: str = field(default="", repr=False)
+    space_association_identifier: str = field(default="", repr=False)
+    space_association_identifiers: Tuple[str, ...] = field(
+        default_factory=tuple, repr=False
+    )
     space_name: str = ""
     # Discovery never opens or stores instruction bodies.  A targeted lookup
     # happens only during an applied capture of this explicit session.
@@ -233,6 +247,85 @@ def _first_value(data: Mapping[str, Any], keys: Sequence[str]) -> Any:
 
 def _first_text(data: Mapping[str, Any], keys: Sequence[str]) -> str:
     return _safe_text(_first_value(data, keys))
+
+
+def _top_level_space_identifier(data: Mapping[str, Any]) -> str:
+    """Return an exact, non-path ``spaceId`` from session metadata.
+
+    The on-disk project-memory directory is keyed by the top-level Cowork
+    ``spaceId``.  This value is kept private and must remain exact: applying
+    metadata redaction or accepting a nested/project display object could
+    redirect a selected capture to a different directory.  Non-canonical path
+    components fail closed and simply disable project-scoped capture.
+    """
+
+    value = data.get("spaceId")
+    if not isinstance(value, str):
+        return ""
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > MAX_SPACE_IDENTIFIER_CHARS
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+    ):
+        return ""
+    return value
+
+
+def _exact_bounded_space_identifier(value: Any) -> Optional[str]:
+    """Return an exact registry-comparison value, never a path component."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_SPACE_IDENTIFIER_CHARS
+        or "\x00" in value
+    ):
+        return None
+    return value
+
+
+def _space_association_identifiers(data: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Retain every bounded association alias in deterministic root-first order.
+
+    Older layouts may carry different exact aliases at the root, in a supported
+    metadata container, or in that container's direct ``space``/``project``
+    object.  These values are equality candidates only.  Project-memory path
+    selection remains restricted to :func:`_top_level_space_identifier`.
+    """
+
+    result: List[str] = []
+    seen: set = set()
+    containers: List[Mapping[str, Any]] = [data]
+    for key in SESSION_METADATA_CONTAINERS:
+        nested = data.get(key)
+        if isinstance(nested, Mapping):
+            containers.append(nested)
+
+    for container in containers:
+        candidate_containers: List[Mapping[str, Any]] = [container]
+        for key in ("space", "project"):
+            nested_object = container.get(key)
+            if isinstance(nested_object, Mapping):
+                candidate_containers.append(nested_object)
+        for index, candidate_container in enumerate(candidate_containers):
+            keys = (
+                ("spaceId", "space_id", "projectId", "project_id")
+                if index == 0
+                else ("id", "spaceId", "space_id", "projectId", "project_id")
+            )
+            for key in keys:
+                value = _exact_bounded_space_identifier(
+                    candidate_container.get(key)
+                )
+                if value is not None and value not in seen:
+                    seen.add(value)
+                    result.append(value)
+    return tuple(result)
 
 
 def _nested_mapping(data: Mapping[str, Any], keys: Sequence[str]) -> Mapping[str, Any]:
@@ -498,6 +591,34 @@ def _is_excluded_session_path(path: Path, source_root: Path) -> bool:
     )
 
 
+def _is_non_session_workspace_path(path: Path, workspace: Path) -> bool:
+    """Reject global/project storage trees as transcript/session roots."""
+
+    try:
+        relative = path.resolve(strict=False).relative_to(workspace.resolve())
+    except (OSError, ValueError):
+        return True
+    return bool(
+        relative.parts
+        and relative.parts[0].casefold() in NON_SESSION_WORKSPACE_ROOTS
+    )
+
+
+def _is_direct_session_lineage(
+    path: Path, workspace: Path, session_root_tokens: set
+) -> bool:
+    """Require the selected session root to be a direct workspace child."""
+
+    try:
+        relative = path.resolve(strict=False).relative_to(workspace.resolve())
+    except (OSError, ValueError):
+        return False
+    return bool(
+        relative.parts
+        and relative.parts[0].casefold() in session_root_tokens
+    )
+
+
 def _locate_transcript(
     data: Mapping[str, Any],
     workspace: Path,
@@ -506,11 +627,11 @@ def _locate_transcript(
     cli_session_identifier: str,
     metadata_path: Path,
 ) -> Tuple[Optional[Path], Optional[str], List[Path], bool]:
+    # Filesystem root authority comes only from the selected metadata filename.
+    # Raw/session/CLI identifiers are untrusted content associations and may
+    # name a sibling session. ``cliSessionId`` remains eligible only as the
+    # transcript filename inside a proven selected root.
     tokens = {metadata_path.stem, metadata_path.stem.removeprefix("local_")}
-    if raw_identifier:
-        tokens.add(raw_identifier)
-    if cli_session_identifier:
-        tokens.add(cli_session_identifier)
     candidate_files: List[Path] = []
     candidate_dirs: List[Path] = []
     session_root_tokens = {
@@ -518,18 +639,22 @@ def _locate_transcript(
         for token in tokens
         if token and token not in {".", ".."} and "/" not in token and "\\" not in token
     }
-    association_tokens = {token for token in session_root_tokens if len(token) >= 6}
+    association_tokens = set(session_root_tokens)
     try:
         workspace_real = workspace.resolve()
     except OSError:
         return None, None, [], False
     for hint in _hinted_paths(data, workspace, source_root):
-        if _is_excluded_session_path(hint, source_root):
+        if _is_excluded_session_path(hint, source_root) or _is_non_session_workspace_path(
+            hint, workspace
+        ):
             continue
-        folded_parts = {part.casefold() for part in hint.parts}
-        if association_tokens and not association_tokens.intersection(folded_parts):
-            # A metadata path hint must still identify this selected session;
-            # otherwise it could redirect capture into another session tree.
+        if association_tokens and not _is_direct_session_lineage(
+            hint, workspace, association_tokens
+        ):
+            # A token nested somewhere below another session root is not an
+            # association. The selected root must be the direct workspace
+            # child so a hint cannot redirect capture through a sibling.
             continue
         try:
             mode = hint.lstat().st_mode
@@ -561,22 +686,31 @@ def _locate_transcript(
                 and not stat.S_ISLNK(mode)
                 and is_relative_to(resolved_candidate, workspace_real)
                 and not _is_excluded_session_path(resolved_candidate, source_root)
+                and not _is_non_session_workspace_path(
+                    resolved_candidate, workspace
+                )
             ):
                 candidate_dirs.append(resolved_candidate)
     if not candidate_dirs:
-        folded_tokens = {token.casefold() for token in tokens if len(token) >= 6}
+        folded_tokens = {token.casefold() for token in tokens}
         for directory in _bounded_dirs(workspace):
             folded = directory.name.casefold()
             if (
                 folded in folded_tokens
+                and directory.parent.resolve() == workspace_real
                 and not _is_excluded_session_path(directory, source_root)
+                and not _is_non_session_workspace_path(directory, workspace)
             ):
                 candidate_dirs.append(directory)
 
     # Search only within directories tied to this metadata record.
     expanded_dirs: List[Path] = []
     for directory in candidate_dirs:
-        if forbidden_name(directory) or contains_forbidden_part(directory):
+        if (
+            forbidden_name(directory)
+            or contains_forbidden_part(directory)
+            or _is_non_session_workspace_path(directory, workspace)
+        ):
             continue
         expanded_dirs.append(directory)
         expanded_dirs.extend(_bounded_dirs(directory, max_depth=3, max_entries=3000))
@@ -621,6 +755,10 @@ def _locate_transcript(
             or not is_relative_to(resolved, workspace_real)
             or forbidden_name(resolved)
             or contains_forbidden_part(resolved)
+            or _is_non_session_workspace_path(resolved, workspace)
+            or not _is_direct_session_lineage(
+                resolved, workspace, session_root_tokens
+            )
         ):
             continue
         path = resolved
@@ -654,15 +792,13 @@ def _locate_transcript(
         # Artifacts may come only from the nearest session-identity directory
         # on the winning transcript's canonical lineage.  Losing transcript
         # candidates never contribute artifact roots.
+        chosen_relative = chosen[3].relative_to(workspace_real)
         proven_root: Optional[Path] = None
-        for parent in chosen[3].parents:
-            if parent == workspace_real:
-                break
-            if not is_relative_to(parent, workspace_real):
-                break
-            if parent.name.casefold() in session_root_tokens:
-                proven_root = parent
-                break
+        if (
+            chosen_relative.parts
+            and chosen_relative.parts[0].casefold() in session_root_tokens
+        ):
+            proven_root = workspace_real / chosen_relative.parts[0]
         return chosen[3], chosen[4], [proven_root] if proven_root is not None else [], False
     return None, None, [], False
 
@@ -818,10 +954,16 @@ def discover_sessions(source: Path) -> InventoryResult:
                 project = _first_text(project_value, ("name", "title"))
             else:
                 project = _safe_text(project_value)
-            space_id = _first_text(data, ("spaceId", "space_id", "projectId"))
             space_object = _nested_mapping(raw, ("space", "project"))
-            if not space_id:
-                space_id = _first_text(space_object, ("id", "spaceId", "projectId"))
+            # Cowork's project-memory schema keys the exact workspace child at
+            # ``spaces/<top-level-spaceId>/memory``.  Display/instruction
+            # association remains broader for compatibility, but is stored in
+            # a separate field that is never used for path construction.
+            space_id = _top_level_space_identifier(raw)
+            space_association_ids = _space_association_identifiers(raw)
+            space_association_id = (
+                space_association_ids[0] if space_association_ids else ""
+            )
             space_name = (
                 _first_text(data, ("spaceName", "workspaceName"))
                 or _first_text(space_object, ("name", "title"))
@@ -866,6 +1008,8 @@ def discover_sessions(source: Path) -> InventoryResult:
                 title=title,
                 project=project,
                 space_identifier=space_id,
+                space_association_identifier=space_association_id,
+                space_association_identifiers=space_association_ids,
                 space_name=space_name,
                 space_has_instructions=None,
                 created_at=_normalise_date(_first_value(data, ("createdAt", "created_at"))),

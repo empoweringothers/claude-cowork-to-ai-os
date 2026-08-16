@@ -9,7 +9,7 @@
       "name": "cowork-ai-os",
       "source": "./plugins/cowork-ai-os",
       "description": "Recover selected local Claude Cowork files, project instructions, memory, and conversations into a private AI OS.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Empowering Others"
       },

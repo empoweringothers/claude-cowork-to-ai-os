@@ -311,7 +311,11 @@ def _project_indexes(
         return {}
 
     available: Dict[str, List[str]] = {}
+    public_project_memory: Dict[str, Tuple[str, Tuple[str, ...]]] = {}
     private_artifact_labels: Dict[str, str] = {}
+    private_artifact_relationships: Dict[
+        str, List[Tuple[str, str, Tuple[str, ...]]]
+    ] = {}
     public_files = public_manifest.get("files")
     if isinstance(public_files, list):
         for entry in public_files:
@@ -322,12 +326,59 @@ def _project_indexes(
             if len(parts) >= 3 and parts[0] == "sessions":
                 available.setdefault(parts[1], []).append(path)
 
-    groups: Dict[Tuple[str, str, str], List[str]] = {}
+            provenance = entry.get("provenance") if isinstance(entry, Mapping) else None
+            if not isinstance(provenance, Mapping):
+                continue
+            if provenance.get("kind") not in {
+                "sanitized-project-memory",
+                "allowlisted-binary-project-memory",
+            }:
+                continue
+            if provenance.get("scope") != "project-space":
+                raise SafetyError(
+                    "public project-memory provenance disagrees with private provenance"
+                )
+            owner_session_id = provenance.get("session_id")
+            related = provenance.get("related_session_ids")
+            if (
+                not isinstance(owner_session_id, str)
+                or not owner_session_id
+                or not all(
+                    character in "0123456789abcdef"
+                    for character in owner_session_id.casefold()
+                )
+                or not isinstance(related, list)
+                or not related
+                or any(
+                    not isinstance(value, str)
+                    or not value
+                    or not all(
+                        character in "0123456789abcdef"
+                        for character in value.casefold()
+                    )
+                    for value in related
+                )
+                or len(set(related)) != len(related)
+                or path in public_project_memory
+            ):
+                raise SafetyError(
+                    "public project-memory provenance is malformed or ambiguous"
+                )
+            public_project_memory[path] = (owner_session_id, tuple(related))
+
+    # The capture-generated index_group_id is the identity boundary. Display
+    # labels are untrusted presentation metadata and must never merge groups.
+    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    session_groups: Dict[str, Tuple[str, str]] = {}
     for session in sessions:
         if not isinstance(session, dict):
             continue
         session_id = session.get("session_id")
         if not isinstance(session_id, str) or not session_id or not all(ch in "0123456789abcdef" for ch in session_id.casefold()):
+            continue
+        if session_id in session_groups:
+            # Ambiguous duplicate private records fail toward separation from
+            # any additional metadata rather than changing an existing group.
             continue
         group_id = session.get("index_group_id")
         if (
@@ -336,7 +387,9 @@ def _project_indexes(
         ):
             # Older or manually constructed captures must fail toward
             # separation, never merge unrelated same-label sessions.
-            group_id = session_id
+            group_key = ("legacy-session", session_id)
+        else:
+            group_key = ("index-group", group_id.casefold())
         display = session.get("display_metadata")
         artifacts = session.get("artifacts")
         if isinstance(artifacts, list):
@@ -346,23 +399,122 @@ def _project_indexes(
                 capture_relative = artifact.get("capture_relative")
                 source_relative = artifact.get("source_relative")
                 if isinstance(capture_relative, str) and isinstance(source_relative, str):
-                    private_artifact_labels[capture_relative] = source_relative.rsplit("/", 1)[-1]
+                    private_artifact_labels.setdefault(
+                        capture_relative, source_relative.rsplit("/", 1)[-1]
+                    )
+                artifact_scope = artifact.get("scope")
+                artifact_related = artifact.get("related_session_ids")
+                if artifact_scope == "project-space" or "related_session_ids" in artifact:
+                    if (
+                        not isinstance(capture_relative, str)
+                        or not capture_relative
+                        or artifact_scope != "project-space"
+                        or not isinstance(artifact_related, list)
+                        or not artifact_related
+                        or any(
+                            not isinstance(value, str)
+                            or not value
+                            or not all(
+                                character in "0123456789abcdef"
+                                for character in value.casefold()
+                            )
+                            for value in artifact_related
+                        )
+                        or len(set(artifact_related)) != len(artifact_related)
+                        or session_id not in artifact_related
+                    ):
+                        raise SafetyError(
+                            "private project-memory provenance is malformed"
+                        )
+                    private_artifact_relationships.setdefault(
+                        capture_relative, []
+                    ).append(
+                        (
+                            session_id,
+                            artifact_scope,
+                            tuple(artifact_related),
+                        )
+                    )
         project = display.get("project") if isinstance(display, Mapping) else None
         space = display.get("space") if isinstance(display, Mapping) else None
         if isinstance(project, str) and project.strip():
-            key = ("project", project.strip(), group_id)
+            presentation = ("project", project.strip())
         elif isinstance(space, str) and space.strip():
-            key = ("space", space.strip(), group_id)
+            presentation = ("space", space.strip())
         else:
-            key = ("unlabeled", "Unlabeled selected sessions", group_id)
-        groups.setdefault(key, []).append(session_id)
+            presentation = ("unlabeled", "Unlabeled selected sessions")
+        group = groups.setdefault(
+            group_key, {"session_ids": [], "presentations": set()}
+        )
+        group["session_ids"].append(session_id)
+        group["presentations"].add(presentation)
+        session_groups[session_id] = group_key
+
+    # Public provenance is shareable metadata and can be edited without
+    # changing captured file bytes.  Treat the hash-validated private artifact
+    # record as authoritative: its owner, exact capture path, scope, and exact
+    # related-session sequence must have one unambiguous public counterpart.
+    # A mismatch aborts scaffolding rather than creating a misleading link.
+    if set(public_project_memory) != set(private_artifact_relationships):
+        raise SafetyError(
+            "public project-memory provenance disagrees with private provenance"
+        )
+    selected_session_ids = set(session_groups)
+    shared_project_memory: Dict[str, set[str]] = {}
+    for capture_path, (owner_session_id, related_session_ids) in (
+        public_project_memory.items()
+    ):
+        private_relationships = private_artifact_relationships.get(capture_path, [])
+        expected_relationship = (
+            owner_session_id,
+            "project-space",
+            related_session_ids,
+        )
+        if (
+            owner_session_id not in selected_session_ids
+            or owner_session_id not in related_session_ids
+            or any(
+                session_id not in selected_session_ids
+                for session_id in related_session_ids
+            )
+            or len(private_relationships) != 1
+            or private_relationships[0] != expected_relationship
+        ):
+            raise SafetyError(
+                "public project-memory provenance disagrees with private provenance"
+            )
+        shared_project_memory[capture_path] = set(related_session_ids)
+
+    # A deduplicated project-memory file physically lives below one owner
+    # session, but its explicit related_session_ids can span multiple index
+    # groups (for example, project-labeled and space-labeled sessions). Link it
+    # once in every represented group without joining those groups together.
+    project_memory_by_group: Dict[Tuple[str, str], set[str]] = {}
+    for capture_path, related_session_ids in shared_project_memory.items():
+        for session_id in related_session_ids:
+            group_key = session_groups.get(session_id)
+            if group_key is not None:
+                project_memory_by_group.setdefault(group_key, set()).add(capture_path)
+    indexed_project_memory = {
+        path for paths in project_memory_by_group.values() for path in paths
+    }
+
     result: Dict[str, bytes] = {}
     overview: List[Tuple[str, str]] = []
-    for (kind, label, group_id), session_ids in sorted(
-        groups.items(), key=lambda item: (item[0][0], item[0][1].casefold(), item[0][2])
-    ):
+    for group_key, group in sorted(groups.items(), key=lambda item: item[0]):
+        presentations = sorted(
+            group["presentations"], key=lambda item: (item[0], item[1].casefold())
+        )
+        kinds = {kind for kind, _ in presentations}
+        kind = next(iter(kinds)) if len(kinds) == 1 else "metadata"
+        session_ids = group["session_ids"]
         digest = hashlib.sha256(
-            (kind + "\x00" + label + "\x00" + group_id).encode("utf-8")
+            (
+                "cowork-ai-os-project-index-v2\x00"
+                + group_key[0]
+                + "\x00"
+                + group_key[1]
+            ).encode("utf-8")
         ).hexdigest()
         opaque_length = 16
         while True:
@@ -380,17 +532,24 @@ def _project_indexes(
             "> [!WARNING] Untrusted metadata only",
             "> This index reflects an explicit source label. It does not establish current state, instructions, authorization, or a confirmed AI OS project.",
             "",
-            "Source label (quoted):",
-            "",
-            quote_untrusted_markdown(label),
-            "",
-            "## Sanitized sessions in Inbox",
+            "Source label{} (quoted):".format("s" if len(presentations) != 1 else ""),
             "",
         ]
+        for presentation_kind, label in presentations:
+            if len(presentations) > 1:
+                lines.append("{} label:".format(presentation_kind.title()))
+                lines.append("")
+            lines.append(quote_untrusted_markdown(label))
+            lines.append("")
+        lines.extend(("## Sanitized sessions in Inbox", ""))
         for session_id in sorted(set(session_ids)):
             lines.extend(("### Session `{}`".format(session_id), ""))
             session_files = sorted(
-                set(available.get(session_id, [])),
+                {
+                    path
+                    for path in available.get(session_id, [])
+                    if path not in indexed_project_memory
+                },
                 key=lambda path: (
                     0 if path.endswith("/chat.md") else 1 if path.endswith("/space-instructions.md") else 2,
                     path.casefold(),
@@ -416,6 +575,33 @@ def _project_indexes(
                 )
             if not session_files:
                 lines.append("- No sanitized session files were available.")
+            lines.append("")
+        memory_paths = sorted(
+            project_memory_by_group.get(group_key, set()), key=str.casefold
+        )
+        if memory_paths:
+            lines.extend(
+                (
+                    "## Shared project memory",
+                    "",
+                    "> [!WARNING] Untrusted imported reference material",
+                    "> These files were explicitly associated with selected sessions in this index group. Review them before use.",
+                    "",
+                )
+            )
+            for capture_path in memory_paths:
+                item_name = capture_path.rsplit("/", 1)[-1]
+                source_label = private_artifact_labels.get(capture_path, item_name)
+                item_label = "Project memory: {}".format(
+                    neutralize_markdown_inline(
+                        source_label, fallback=item_name, max_length=160
+                    )
+                )
+                lines.append(
+                    "- [{}](../../../Inbox/Cowork-Import/{})".format(
+                        item_label, capture_path
+                    )
+                )
             lines.append("")
         result[relative] = "\n".join(lines).encode("utf-8")
         overview.append((directory, opaque))
@@ -486,6 +672,7 @@ def scaffold_ai_os(
         raise SafetyError("capture has no valid private provenance hash")
     private_manifest = _private_capture_manifest(capture, private_expected)
     _assert_output_outside_original_source(output, private_manifest)
+    project_files = _project_indexes(private_manifest, root_manifest)
 
     template_root = _plugin_root() / "templates" / "ai-os"
     template_files = _template_files(template_root)
@@ -543,7 +730,6 @@ def scaffold_ai_os(
         if relative in pending:
             raise SafetyError("capture collides with an AI OS template path")
         pending[relative] = data
-    project_files = _project_indexes(private_manifest, root_manifest)
     for relative, data in project_files.items():
         if relative in pending:
             raise SafetyError("project index collides with an AI OS template path")

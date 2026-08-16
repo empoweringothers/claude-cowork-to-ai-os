@@ -26,6 +26,34 @@
 - `Outputs/`: new work made from the recovered OS, not imported originals.
 - `System/`: permissions, schema, doctor notes, and operating policy.
 
+## Imported capture placement
+
+Selected material stays below the ignored, review-only import root:
+
+```text
+Inbox/Cowork-Import/sessions/<opaque-session>/
+  chat.md
+  space-instructions.md
+  memory/
+  project-memory/
+  uploads/
+  outputs/
+```
+
+Only paths that exist in the approved capture are created. Project memory comes
+from `workspace/spaces/<exact-spaceId>/memory/`. When selected sessions share
+that exact project-memory root, each source file appears once and provenance
+lists all related opaque sessions.
+
+The generated `Projects/Cowork-Import/` entries are indexes into this Inbox,
+not activation or duplication of imported context. A session without an exact
+project/space identity receives its own unassigned index. A shared display
+label alone never merges sessions.
+
+External folders linked in Cowork are not import sources. Record an existing
+local folder as a reviewed private reference if useful; never copy the folder
+tree merely because Cowork linked it.
+
 ## Internal provenance
 
 ```text
