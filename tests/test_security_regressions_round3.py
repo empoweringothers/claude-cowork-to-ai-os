@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 LIB = REPO / "plugins" / "cowork-ai-os" / "lib"
 sys.path.insert(0, str(LIB))
 
+import cowork_ai_os.capture as capture_module
 import cowork_ai_os.safety as safety
 import cowork_ai_os.verify as verify_module
 from cowork_ai_os.capture import capture_sessions
@@ -82,6 +83,42 @@ class SecurityRegressionRoundThreeTests(unittest.TestCase):
                 apply=True,
                 approved_plan=token,
             )
+        self.assertFalse(output.exists())
+
+    def test_safe_spaces_change_marker_failure_fails_preview_closed(self) -> None:
+        spaces = self.workspace / "spaces.json"
+        spaces.write_text(
+            json.dumps(
+                {
+                    "spaces": [
+                        {
+                            "id": "space-alpha",
+                            "instructions": "SYNTHETIC_SPACE_INSTRUCTIONS",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        session_id = discover_sessions(self.source).sessions[0].safe_id
+        output = self.base / "capture"
+        real_change_marker = capture_module.source_file_change_marker
+
+        def fail_registry_marker(path, root, **kwargs):
+            if Path(path).name == "spaces.json":
+                raise SafetyError("synthetic change metadata failure")
+            return real_change_marker(path, root, **kwargs)
+
+        with mock.patch.object(
+            capture_module,
+            "source_file_change_marker",
+            side_effect=fail_registry_marker,
+        ):
+            with self.assertRaisesRegex(SafetyError, "change metadata failure"):
+                capture_sessions(
+                    self.source, [session_id], output, apply=False
+                )
+
         self.assertFalse(output.exists())
 
     def test_doctor_rejects_protected_explicit_root_without_opening_it(self) -> None:
@@ -193,6 +230,107 @@ class SecurityRegressionRoundThreeTests(unittest.TestCase):
                     verify_module._stream_secret_scan(target, expected)
 
         self.assertEqual(fstat_calls, 2)
+
+    def test_windows_change_marker_uses_handle_change_time(self) -> None:
+        common = {
+            "st_mode": 0o100600,
+            "st_dev": 11,
+            "st_ino": 22,
+            "st_nlink": 1,
+            "st_size": 33,
+            "st_mtime_ns": 44,
+        }
+        path_stat = SimpleNamespace(**common, st_ctime_ns=55)
+        handle_stat = SimpleNamespace(**common, st_ctime_ns=66)
+
+        with mock.patch.object(safety.os, "name", "nt"), mock.patch.object(
+            safety, "ensure_contained_regular", side_effect=[path_stat, path_stat]
+        ), mock.patch.object(
+            safety, "_open_windows_contained_readonly", return_value=123
+        ) as open_contained, mock.patch.object(
+            safety.os, "fstat", side_effect=[handle_stat, handle_stat]
+        ), mock.patch.object(
+            safety,
+            "_windows_file_change_time_100ns",
+            side_effect=[700, 700],
+        ), mock.patch.object(safety.os, "close"):
+            marker = safety.source_file_change_marker(
+                self.base / "synthetic.txt", self.source
+            )
+
+        self.assertEqual(marker, ("windows-change-time-100ns", 700))
+        open_contained.assert_called_once_with(
+            self.base / "synthetic.txt", self.source, metadata_only=True
+        )
+
+    def test_windows_change_marker_rejects_change_during_query(self) -> None:
+        common = {
+            "st_mode": 0o100600,
+            "st_dev": 11,
+            "st_ino": 22,
+            "st_nlink": 1,
+            "st_size": 33,
+            "st_mtime_ns": 44,
+        }
+        path_stat = SimpleNamespace(**common, st_ctime_ns=55)
+        handle_stat = SimpleNamespace(**common, st_ctime_ns=66)
+
+        with mock.patch.object(safety.os, "name", "nt"), mock.patch.object(
+            safety, "ensure_contained_regular", side_effect=[path_stat, path_stat]
+        ), mock.patch.object(
+            safety, "_open_windows_contained_readonly", return_value=123
+        ), mock.patch.object(
+            safety.os, "fstat", side_effect=[handle_stat, handle_stat]
+        ), mock.patch.object(
+            safety,
+            "_windows_file_change_time_100ns",
+            side_effect=[700, 701],
+        ), mock.patch.object(safety.os, "close"):
+            with self.assertRaisesRegex(SafetyError, "metadata inspection"):
+                safety.source_file_change_marker(
+                    self.base / "synthetic.txt", self.source
+                )
+
+    def test_fallback_writes_and_hashes_in_binary_mode(self) -> None:
+        binary_flag = 0x8000
+        noinherit_flag = 0x0080
+        write_open = mock.Mock(return_value=123)
+
+        with mock.patch.object(safety, "HAS_SECURE_DIR_FD", False), mock.patch.object(
+            safety, "secure_mkdir"
+        ), mock.patch.object(safety.os, "O_BINARY", binary_flag, create=True), mock.patch.object(
+            safety.os, "O_NOINHERIT", noinherit_flag, create=True
+        ), mock.patch.object(safety.os, "open", write_open), mock.patch.object(
+            safety.os, "write", side_effect=lambda descriptor, data: len(data)
+        ), mock.patch.object(safety.os, "close"), mock.patch.object(
+            safety.os, "chmod"
+        ):
+            safety.secure_write(self.base / "binary-output.json", b"a\nb\n")
+
+        write_flags = write_open.call_args.args[1]
+        self.assertTrue(write_flags & binary_flag)
+        self.assertTrue(write_flags & noinherit_flag)
+
+        info = SimpleNamespace(
+            st_mode=0o100600,
+            st_nlink=1,
+            st_size=4,
+            st_mtime_ns=44,
+            st_ino=22,
+        )
+        hash_open = mock.Mock(return_value=124)
+        with mock.patch.object(safety.os, "O_BINARY", binary_flag, create=True), mock.patch.object(
+            safety.os, "O_NOINHERIT", noinherit_flag, create=True
+        ), mock.patch.object(safety.os, "open", hash_open), mock.patch.object(
+            safety.os, "fstat", side_effect=[info, info]
+        ), mock.patch.object(safety.os, "read", side_effect=[b"a\nb\n", b""]), mock.patch.object(
+            safety.os, "close"
+        ):
+            safety.sha256_file(self.base / "binary-output.json")
+
+        hash_flags = hash_open.call_args.args[1]
+        self.assertTrue(hash_flags & binary_flag)
+        self.assertTrue(hash_flags & noinherit_flag)
 
     @unittest.skipIf(os.name == "nt", "hard-link timing test is POSIX-specific")
     def test_verify_rejects_file_swapped_to_hardlink_after_inventory(self) -> None:

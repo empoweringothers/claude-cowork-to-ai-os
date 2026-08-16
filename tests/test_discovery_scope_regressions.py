@@ -78,6 +78,59 @@ class DiscoveryScopeRegressionTests(unittest.TestCase):
         self.assertEqual(record.artifact_roots["uploads"], [])
         self.assertEqual(record.artifact_stats["uploads"]["files"], 0)
 
+    def test_nested_selected_token_under_other_session_is_not_an_association(self) -> None:
+        relative = Path("other-session/selected-session")
+        self.write_metadata(
+            "local_selected-session.json",
+            {
+                "id": "selected-session",
+                "title": "Selected metadata",
+                "transcriptPath": (relative / "transcript.jsonl").as_posix(),
+            },
+        )
+        decoy = self.workspace / relative
+        (decoy / "uploads").mkdir(parents=True)
+        (decoy / "transcript.jsonl").write_text(
+            json.dumps({"role": "user", "content": "UNSELECTEDBODYCANARY"})
+            + "\n",
+            encoding="utf-8",
+        )
+        (decoy / "uploads" / "unselected.txt").write_text(
+            "UNSELECTEDUPLOADCANARY", encoding="utf-8"
+        )
+
+        record = self.only_record()
+
+        self.assertIsNone(record.transcript_path)
+        self.assertEqual(record.artifact_roots["uploads"], [])
+        self.assertEqual(record.artifact_stats["uploads"]["files"], 0)
+
+    def test_cli_session_id_cannot_name_a_sibling_session_root(self) -> None:
+        self.write_metadata(
+            "local_selected-session.json",
+            {
+                "id": "selected-session",
+                "cliSessionId": "other-session",
+                "title": "Selected metadata",
+                "transcriptPath": "other-session/transcript.jsonl",
+            },
+        )
+        sibling = self.workspace / "other-session"
+        (sibling / "uploads").mkdir(parents=True)
+        (sibling / "transcript.jsonl").write_text(
+            json.dumps({"role": "user", "content": "SIBLINGBODYCANARY"})
+            + "\n",
+            encoding="utf-8",
+        )
+        (sibling / "uploads" / "sibling.txt").write_text(
+            "SIBLINGUPLOADCANARY", encoding="utf-8"
+        )
+
+        record = self.only_record()
+
+        self.assertIsNone(record.transcript_path)
+        self.assertEqual(record.artifact_roots["uploads"], [])
+
     def test_workspace_artifacts_are_not_attached_to_a_session(self) -> None:
         self.write_metadata(
             "local_session-one.json",

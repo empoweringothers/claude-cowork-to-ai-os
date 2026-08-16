@@ -222,6 +222,15 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--output", required=True, help="fresh destination directory")
     capture.add_argument("--apply", action="store_true", help="write the capture; omission is a zero-write dry run")
     capture.add_argument("--approve-plan", help="approval token printed by the matching dry-run preview")
+    capture.add_argument(
+        "--include-hardlinked-uploads",
+        action="store_true",
+        help=(
+            "include hardlinked regular files only from explicitly selected "
+            "session upload folders; copies by value and is bound to the "
+            "preview approval token"
+        ),
+    )
     capture.add_argument("--max-transcript-bytes", type=_positive_int, default=32 * 1024 * 1024)
     capture.add_argument("--max-messages", type=_positive_int, default=10000)
     capture.add_argument("--max-text-chars", type=_positive_int, default=12 * 1024 * 1024)
@@ -298,6 +307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 apply=args.apply,
                 limits=limits,
                 approved_plan=args.approve_plan,
+                include_hardlinked_uploads=args.include_hardlinked_uploads,
             )
             sys.stdout.write(_json(result))
             return 0

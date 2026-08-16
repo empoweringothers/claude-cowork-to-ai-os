@@ -101,7 +101,7 @@ class DiscoveryHardeningRoundTwoTests(unittest.TestCase):
         )
 
     def test_only_winning_transcript_root_supplies_artifacts(self) -> None:
-        native = self.workspace / "native-copy" / "session-winner"
+        native = self.workspace / "session-winner"
         audit = self.workspace / "audit-copy" / "session-winner"
         self.write_transcript(native / "transcript.jsonl", "WINNING_NATIVE")
         self.write_transcript(audit / "audit.jsonl", "LOSING_AUDIT")
@@ -135,7 +135,7 @@ class DiscoveryHardeningRoundTwoTests(unittest.TestCase):
     def test_ambiguous_transcripts_supply_no_artifact_roots(self) -> None:
         candidates = []
         for branch in ("copy-one", "copy-two"):
-            session = self.workspace / branch / "session-ambiguous"
+            session = self.workspace / "session-ambiguous" / branch
             transcript = session / "transcript.jsonl"
             self.write_transcript(transcript, branch)
             (session / "uploads").mkdir()

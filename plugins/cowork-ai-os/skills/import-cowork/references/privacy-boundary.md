@@ -8,7 +8,7 @@ and organization. Confirm the intended profile before the first content read.
 
 1. Inventory metadata only.
 2. Select a profile and individual sessions.
-3. Preview the capture.
+3. Preview the capture, including exact project-memory metadata.
 4. Capture redacted content locally.
 5. Review candidate memory and instructions.
 6. Promote only approved items.
@@ -21,6 +21,15 @@ and organization. Confirm the intended profile before the first content read.
 - live imported scripts, hooks, skills, or tool commands;
 - personal content into a work OS, or work content into a personal OS, by
   convenience.
+
+## Filesystem-link boundary
+
+Symlinks are never followed. Hardlinks are skipped unless the user explicitly
+previews `--include-hardlinked-uploads`; that option applies only to regular
+files in selected session upload folders and writes fresh by-value copies.
+Hardlinked memory, project memory, and outputs remain excluded. Linked Cowork
+folders are references, not permission to traverse or duplicate external
+trees.
 
 ## Honest claim
 

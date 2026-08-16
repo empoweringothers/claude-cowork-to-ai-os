@@ -1,8 +1,8 @@
 # Claude Cowork to AI OS
 
 Recover the parts of your local Claude Cowork work that you choose—project
-instructions, session memory, conversations, uploads, and generated files—and
-place them into a private, readable AI OS for Claude Code.
+instructions, project and session memory, conversations, uploads, and generated
+files—and place them into a private, readable AI OS for Claude Code.
 
 This is a community project from Empowering Others. It is not an Anthropic
 product and it does not migrate a Claude account.
@@ -16,7 +16,8 @@ standard library and does not install packages or make network calls.
 2. Creates a metadata-only inventory in JSON, Markdown, and an offline HTML
    viewer.
 3. Lets you choose sessions before any conversation or file content is read.
-4. Captures only the selected content into a new destination.
+4. Captures only the selected content, including exact project-scoped memory,
+   into a new destination.
 5. Redacts common secret patterns, skips symlinks and credential-bearing files,
    and records provenance and hashes.
 6. Builds a Markdown AI OS that Claude Code can navigate.
@@ -24,13 +25,10 @@ standard library and does not install packages or make network calls.
 The source Cowork directories are read-only. The tool never signs in, changes
 accounts, writes into Claude Desktop, or calls an undocumented web API.
 
-## Quick start after release
-
-The public marketplace commands will be available after the first tagged
-release:
+## Quick start
 
 ```text
-/plugin marketplace add empoweringothers/claude-cowork-to-ai-os@v0.1.0
+/plugin marketplace add empoweringothers/claude-cowork-to-ai-os@v0.1.1
 /plugin install cowork-ai-os@empowering-others-ai
 /reload-plugins
 /cowork-ai-os:import-cowork
@@ -74,6 +72,11 @@ The tool will not deliberately open or copy these as source stores/artifacts:
 - hidden/system prompts or raw tool inputs and results by default;
 - linked external folders;
 - anything from a session you did not select.
+
+Linked Cowork folders remain references. The importer may show their basenames
+to help you identify a session, but it never follows or duplicates those folder
+trees. Keep the original folder in place or add a reviewed pointer to it in the
+private AI OS.
 
 A selected conversation or ordinary text file may already contain a sensitive
 value. Common patterns are redacted, but human review is still required.
@@ -119,12 +122,26 @@ until a person deliberately promotes them.
   welcome
 - native Cowork/Claude Code JSONL transcripts: supported when present
 - Cowork `audit.jsonl`: conservative fallback
-- `spaces.json` project names and explicit project instructions: supported
+- project instructions: exact workspace `spaces.json` match, with a selected
+  session-metadata fallback when the registry is absent or has no matching
+  instructions
+- project memory at `workspace/spaces/<spaceId>/memory/`: selected capture,
+  deduplicated when multiple selected sessions belong to the same project
 - session `memory/`, `uploads/`, and `outputs/`: selected capture
 - cloud-only Cowork sessions or content absent from local storage: not
   recoverable by this tool
 
-See [`SUPPORTED-SOURCES.md`](SUPPORTED-SOURCES.md) for the exact boundary.
+Project identity is workspace-local. A matching ID in another workspace is not
+used. Sessions without a usable project/space identifier stay separate; the
+tool never guesses a project from a title or display label.
+
+Hardlinked files remain excluded by default. Cowork session uploads may be
+represented as hardlinks, so `capture` also offers the explicit
+`--include-hardlinked-uploads` option. It applies only to regular files inside
+an explicitly selected session's `uploads/` folder, is bound to the dry-run
+approval token, and writes a new by-value copy. It never enables hardlinked
+session memory, project memory, outputs, or symlinks. See
+[`SUPPORTED-SOURCES.md`](SUPPORTED-SOURCES.md) for the full boundary.
 
 If a session is cloud-only, missing, or no longer parseable, use the supported
 Claude UI steps in [`docs/MANUAL-UI-FALLBACK.md`](docs/MANUAL-UI-FALLBACK.md).
@@ -162,7 +179,7 @@ email, personal path, token, or recovered file to this repository.
 
 ## Status
 
-`0.1.0` is a pre-release MVP. Cowork's local format is undocumented and may
+`0.1.1` is a pre-release MVP. Cowork's local format is undocumented and may
 change. The doctor and inventory stages fail closed when the format is not
 recognized; source data remains untouched.
 
