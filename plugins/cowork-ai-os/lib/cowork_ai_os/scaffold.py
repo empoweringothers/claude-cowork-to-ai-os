@@ -252,12 +252,15 @@ def _private_capture_manifest(
     private_path = capture_root / ".private" / "provenance.json"
     try:
         data = read_regular_bytes(private_path, capture_root, 8 * 1024 * 1024)
-        if expected_sha256 is not None and not hmac.compare_digest(
-            sha256_bytes(data), expected_sha256.casefold()
-        ):
-            raise SafetyError("private capture provenance changed")
+    except SafetyError as exc:
+        raise SafetyError("private capture provenance is malformed") from exc
+    if expected_sha256 is not None and not hmac.compare_digest(
+        sha256_bytes(data), expected_sha256.casefold()
+    ):
+        raise SafetyError("private capture provenance changed")
+    try:
         parsed = json.loads(data.decode("utf-8"))
-    except (SafetyError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise SafetyError("private capture provenance is malformed") from exc
     if not isinstance(parsed, Mapping):
         raise SafetyError("private capture provenance is malformed")

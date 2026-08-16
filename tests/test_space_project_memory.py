@@ -366,8 +366,11 @@ class SpaceProjectMemoryTests(unittest.TestCase):
         memory.write_text("PROJECTMEMORYBRAVO", encoding="utf-8")
         os.utime(
             memory,
-            ns=(before.st_atime_ns, max(before.st_mtime_ns + 1, memory.stat().st_mtime_ns)),
+            ns=(before.st_atime_ns, before.st_mtime_ns),
         )
+        changed = memory.stat()
+        self.assertEqual(changed.st_size, before.st_size)
+        self.assertEqual(changed.st_mtime_ns, before.st_mtime_ns)
         second = capture_sessions(self.source, selector, output, apply=False)
 
         self.assertNotEqual(first["approval_token"], second["approval_token"])

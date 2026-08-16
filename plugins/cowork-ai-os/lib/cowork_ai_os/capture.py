@@ -35,6 +35,7 @@ from .safety import (
     secure_mkdir_fresh,
     secure_write,
     sha256_bytes,
+    source_file_change_marker,
 )
 
 
@@ -79,6 +80,7 @@ class ArtifactSource:
     size: int
     mtime_ns: int
     ctime_ns: int
+    change_marker: Tuple[str, int]
     device: int
     inode: int
     link_count: int
@@ -96,26 +98,30 @@ def _file_metadata_marker(
     info = ensure_contained_regular(
         path, root, allow_source_hardlinks=allow_source_hardlinks
     )
+    change_kind, change_value = source_file_change_marker(
+        path, root, allow_source_hardlinks=allow_source_hardlinks
+    )
     return {
         "state": "regular",
         "source_relative": path.relative_to(root).as_posix(),
         "bytes": info.st_size,
         "mtime_ns": info.st_mtime_ns,
         "ctime_ns": info.st_ctime_ns,
+        "change": {"kind": change_kind, "value": change_value},
         "device": info.st_dev,
         "inode": info.st_ino,
         "links": info.st_nlink,
     }
 
 
-def _optional_path_marker(path: Path) -> Dict[str, Any]:
+def _optional_path_marker(path: Path, root: Path) -> Dict[str, Any]:
     """Bind both absence and lstat identity into an approval plan."""
 
     try:
         info = path.lstat()
     except FileNotFoundError:
         return {"state": "absent"}
-    return {
+    marker: Dict[str, Any] = {
         "state": "present",
         "mode_type": stat.S_IFMT(info.st_mode),
         "bytes": info.st_size,
@@ -125,6 +131,13 @@ def _optional_path_marker(path: Path) -> Dict[str, Any]:
         "inode": info.st_ino,
         "links": info.st_nlink,
     }
+    if stat.S_ISREG(info.st_mode) and info.st_nlink <= 1:
+        # A safe regular registry must have a strong change marker. Query
+        # failure is fail-closed; only nonregular or hardlinked registries,
+        # whose bodies are already ineligible, omit it.
+        change_kind, change_value = source_file_change_marker(path, root)
+        marker["change"] = {"kind": change_kind, "value": change_value}
+    return marker
 
 
 def _assert_marker_unchanged(
@@ -143,9 +156,32 @@ def _assert_marker_unchanged(
         raise SafetyError("selected source metadata changed after preview; run a new dry-run")
 
 
-def _assert_optional_path_unchanged(path: Path, expected: Mapping[str, Any]) -> None:
-    if _optional_path_marker(path) != expected:
+def _assert_optional_path_unchanged(
+    path: Path, root: Path, expected: Mapping[str, Any]
+) -> None:
+    if _optional_path_marker(path, root) != expected:
         raise SafetyError("selected source metadata changed after preview; run a new dry-run")
+
+
+def _artifact_file_marker(
+    artifact: ArtifactSource, source_root: Path
+) -> Dict[str, Any]:
+    """Rebuild one planned artifact marker without reopening its body."""
+
+    return {
+        "state": "regular",
+        "source_relative": artifact.source_path.relative_to(source_root).as_posix(),
+        "bytes": artifact.size,
+        "mtime_ns": artifact.mtime_ns,
+        "ctime_ns": artifact.ctime_ns,
+        "change": {
+            "kind": artifact.change_marker[0],
+            "value": artifact.change_marker[1],
+        },
+        "device": artifact.device,
+        "inode": artifact.inode,
+        "links": artifact.link_count,
+    }
 
 
 def _inline(value: str, fallback: str = "Untitled session") -> str:
@@ -614,6 +650,11 @@ def _walk_artifact_roots(
                         source_root,
                         allow_source_hardlinks=allowed_hardlinked_upload,
                     )
+                    change_marker = source_file_change_marker(
+                        path,
+                        source_root,
+                        allow_source_hardlinks=allowed_hardlinked_upload,
+                    )
                 except SafetyError:
                     warnings.append("Skipped an unsafe linked {} file.".format(label))
                     continue
@@ -623,6 +664,7 @@ def _walk_artifact_roots(
                 ):
                     warnings.append("Skipped a changed {} file.".format(label))
                     continue
+                info = contained_info
                 marker = (
                     ("inode", info.st_dev, info.st_ino)
                     if info.st_ino
@@ -653,6 +695,7 @@ def _walk_artifact_roots(
                         info.st_size,
                         info.st_mtime_ns,
                         info.st_ctime_ns,
+                        change_marker,
                         info.st_dev,
                         info.st_ino,
                         info.st_nlink,
@@ -926,7 +969,7 @@ def capture_sessions(
             "metadata": _file_metadata_marker(record.metadata_path, inventory.source_root),
             "transcript": None,
             "workspace_spaces": _optional_path_marker(
-                record.workspace_path / "spaces.json"
+                record.workspace_path / "spaces.json", inventory.source_root
             ),
         }
         if record.transcript_path is not None:
@@ -951,12 +994,9 @@ def capture_sessions(
                 "kind": artifact.kind,
                 "source": str(artifact.source_path),
                 "destination": artifact.destination_path,
-                "bytes": artifact.size,
-                "mtime_ns": artifact.mtime_ns,
-                "ctime_ns": artifact.ctime_ns,
-                "device": artifact.device,
-                "inode": artifact.inode,
-                "links": artifact.link_count,
+                "source_metadata": _artifact_file_marker(
+                    artifact, inventory.source_root
+                ),
             }
             for artifact in planned_artifacts
         ],
@@ -1008,7 +1048,9 @@ def capture_sessions(
         spaces_marker = source_markers["workspace_spaces"]
         if isinstance(spaces_marker, Mapping):
             _assert_optional_path_unchanged(
-                record.workspace_path / "spaces.json", spaces_marker
+                record.workspace_path / "spaces.json",
+                inventory.source_root,
+                spaces_marker,
             )
         selected_space_name, selected_instructions, instruction_source, space_warnings = _selected_space_details(
             record, inventory.source_root
@@ -1024,7 +1066,9 @@ def capture_sessions(
         )
         if isinstance(spaces_marker, Mapping):
             _assert_optional_path_unchanged(
-                record.workspace_path / "spaces.json", spaces_marker
+                record.workspace_path / "spaces.json",
+                inventory.source_root,
+                spaces_marker,
             )
         if record.transcript_path is not None:
             transcript_data = read_regular_bytes(
@@ -1145,18 +1189,9 @@ def capture_sessions(
             and artifact.kind == "uploads"
             and artifact.link_count > 1
         )
-        expected_artifact_marker = {
-            "state": "regular",
-            "source_relative": artifact.source_path.relative_to(
-                inventory.source_root
-            ).as_posix(),
-            "bytes": artifact.size,
-            "mtime_ns": artifact.mtime_ns,
-            "ctime_ns": artifact.ctime_ns,
-            "device": artifact.device,
-            "inode": artifact.inode,
-            "links": artifact.link_count,
-        }
+        expected_artifact_marker = _artifact_file_marker(
+            artifact, inventory.source_root
+        )
         _assert_marker_unchanged(
             artifact.source_path,
             inventory.source_root,

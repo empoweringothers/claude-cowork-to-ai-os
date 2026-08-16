@@ -68,7 +68,11 @@ def _stream_secret_scan(
 ) -> Tuple[List[str], bool]:
     """Scan bounded chunks with overlap; return findings and oversize flag."""
 
-    flags = os.O_RDONLY
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(path), flags)

@@ -17,7 +17,11 @@ MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    flags = os.O_RDONLY
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(str(path), flags)
@@ -47,7 +51,11 @@ def _read_manifest() -> bytes:
     ):
         raise ValueError("FILE-SHA256SUMS.json must be a bounded, single-link regular file")
 
-    flags = os.O_RDONLY
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(str(MANIFEST), flags)

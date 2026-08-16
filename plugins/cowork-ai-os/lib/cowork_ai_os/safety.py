@@ -301,13 +301,17 @@ def _open_contained_readonly(path: Path, root: Path) -> int:
         os.close(descriptor)
 
 
-def _open_windows_contained_readonly(path: Path, root: Path) -> int:
+def _open_windows_contained_readonly(
+    path: Path, root: Path, *, metadata_only: bool = False
+) -> int:
     """Open a Windows file and prove its handle resolves beneath ``root``.
 
     Windows does not expose POSIX ``dir_fd`` traversal. A path can therefore
     change through a parent junction or symlink between validation and open.
     ``GetFinalPathNameByHandleW`` binds the containment decision to the actual
     opened handle, which is stable even if the pathname changes again.
+    ``metadata_only`` requests only ``FILE_READ_ATTRIBUTES`` so approval
+    previews can inspect change metadata without opening the body for reading.
     """
 
     if os.name != "nt":
@@ -356,6 +360,7 @@ def _open_windows_contained_readonly(path: Path, root: Path) -> int:
     close_handle.restype = wintypes.BOOL
 
     generic_read = 0x80000000
+    file_read_attributes = 0x00000080
     share_read_write_delete = 0x00000001 | 0x00000002 | 0x00000004
     open_existing = 3
     file_attribute_normal = 0x00000080
@@ -365,7 +370,7 @@ def _open_windows_contained_readonly(path: Path, root: Path) -> int:
     root_name = os.path.normcase(os.path.abspath(str(root_absolute.resolve())))
     handle = create_file(
         str(path_absolute),
-        generic_read,
+        file_read_attributes if metadata_only else generic_read,
         share_read_write_delete,
         None,
         open_existing,
@@ -406,6 +411,113 @@ def _open_windows_contained_readonly(path: Path, root: Path) -> int:
     finally:
         if not transferred:
             close_handle(handle)
+
+
+def _windows_file_change_time_100ns(descriptor: int) -> int:
+    """Return the NTFS change timestamp for an already-contained file handle.
+
+    Python's Windows ``st_ctime`` is creation time, so it cannot bind an
+    approval token to a same-size rewrite whose last-write timestamp is later
+    restored. ``FILE_BASIC_INFO.ChangeTime`` is content-free handle metadata
+    that advances for that rewrite. Keep its native 100 ns unit explicit.
+    """
+
+    if os.name != "nt":
+        raise SafetyError("Windows file change metadata is unavailable")
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+    except ImportError as exc:  # pragma: no cover - Windows stdlib invariant
+        raise SafetyError("Windows file change metadata is unavailable") from exc
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = (
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        )
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_file_information = kernel32.GetFileInformationByHandleEx
+    get_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    get_file_information.restype = wintypes.BOOL
+
+    try:
+        handle = msvcrt.get_osfhandle(descriptor)
+    except OSError as exc:
+        raise SafetyError("Windows file change metadata is unavailable") from exc
+    if handle == -1:
+        raise SafetyError("Windows file change metadata is unavailable")
+
+    basic = FileBasicInfo()
+    # FILE_INFO_BY_HANDLE_CLASS.FileBasicInfo
+    if not get_file_information(
+        handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)
+    ):
+        raise SafetyError("Windows file change metadata is unavailable")
+    value = int(basic.ChangeTime)
+    if value <= 0:
+        raise SafetyError("Windows file change metadata is unavailable")
+    return value
+
+
+def source_file_change_marker(
+    path: Path,
+    root: Path,
+    *,
+    allow_source_hardlinks: bool = False,
+) -> Tuple[str, int]:
+    """Return content-free change metadata for an approval boundary.
+
+    POSIX ``ctime`` records an inode change. On Windows, query the actual file
+    handle's ``FILE_BASIC_INFO.ChangeTime`` because path ``st_ctime`` is the
+    creation timestamp. The handle identity and path identity are checked
+    around the query so a link or file swap cannot supply the marker.
+    """
+
+    before = ensure_contained_regular(
+        path, root, allow_source_hardlinks=allow_source_hardlinks
+    )
+    if os.name != "nt":
+        return ("posix-ctime-ns", before.st_ctime_ns)
+
+    expected_identity = _source_file_identity(before)
+    expected_comparable_identity = _source_file_comparable_identity(before)
+    descriptor = _open_windows_contained_readonly(
+        path, root, metadata_only=True
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _source_file_comparable_identity(opened)
+            != expected_comparable_identity
+        ):
+            raise SafetyError("source file changed during metadata inspection")
+        opened_identity = _source_file_identity(opened)
+        change_before = _windows_file_change_time_100ns(descriptor)
+        after = os.fstat(descriptor)
+        path_after = ensure_contained_regular(
+            path, root, allow_source_hardlinks=allow_source_hardlinks
+        )
+        change_after = _windows_file_change_time_100ns(descriptor)
+        if (
+            _source_file_identity(after) != opened_identity
+            or _source_file_identity(path_after) != expected_identity
+            or change_after != change_before
+        ):
+            raise SafetyError("source file changed during metadata inspection")
+        return ("windows-change-time-100ns", change_after)
+    finally:
+        os.close(descriptor)
 
 
 def read_regular_bytes(
@@ -471,7 +583,11 @@ def sha256_file(path: Path, root: Optional[Path] = None, max_bytes: int = 1024 *
     if root is not None:
         return sha256_bytes(read_regular_bytes(path, root, max_bytes))
     digest = hashlib.sha256()
-    flags = os.O_RDONLY
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(path), flags)
@@ -755,7 +871,13 @@ def secure_write(path: Path, data: bytes) -> None:
         return
 
     secure_mkdir(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(path), flags, 0o600)
